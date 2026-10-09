@@ -7,7 +7,9 @@ const PANEL_HEIGHT = 520;
 const GAP = 12;
 const MARGIN = 8;
 const MAX_LENGTH = 2000;
-const REPLY_DELAY_MS = 600;
+const REQUEST_TIMEOUT_MS = 15000;
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const ERROR_TEXT = "Can't reach Origin server. Is the API running?";
 
 type Message = {
   id: number;
@@ -52,7 +54,7 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
   const nextId = useRef(1);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
-  const timers = useRef<number[]>([]);
+  const controllerRef = useRef<AbortController | null>(null);
 
   // Place the panel next to the orb whenever it opens or the window resizes.
   useEffect(() => {
@@ -76,31 +78,45 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
   }, [messages, waiting, open]);
 
   useEffect(() => {
-    const pending = timers.current;
-    return () => pending.forEach((id) => window.clearTimeout(id));
+    return () => controllerRef.current?.abort();
   }, []);
 
-  function send() {
+  async function send() {
     const text = draft.trim();
-    if (!text) return;
+    if (!text || waiting) return;
     setMessages((prev) => [
       ...prev,
       { id: nextId.current++, role: "user", content: text },
     ]);
     setDraft("");
     setWaiting(true);
-    const timer = window.setTimeout(() => {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextId.current++,
-          role: "assistant",
-          content: `Demo mode. You said: "${text}". Real answers arrive once the AI is connected.`,
-        },
-      ]);
-      setWaiting(false);
-    }, REPLY_DELAY_MS);
-    timers.current.push(timer);
+
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let reply = ERROR_TEXT;
+    try {
+      const res = await fetch(`${API_URL}/v1/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text }),
+        signal: controller.signal,
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { reply?: unknown };
+        if (typeof data.reply === "string") reply = data.reply;
+      }
+    } catch {
+      // Network error, timeout or abort: keep the error text.
+    } finally {
+      window.clearTimeout(timeout);
+    }
+    if (controller.signal.aborted && controllerRef.current !== controller) return;
+    setMessages((prev) => [
+      ...prev,
+      { id: nextId.current++, role: "assistant", content: reply },
+    ]);
+    setWaiting(false);
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
