@@ -1,30 +1,73 @@
 @import "tailwindcss";
 
+/* ── Theme tokens ─────────────────────────────────────────── */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #07070f;
+  --fg: #f3f2ff;
+  --muted: #b9b8d3;
+  --aurora-from: #38bdf8;
+  --aurora-via: #8b5cf6;
+  --aurora-to: #ec4899;
+  --card-border: rgba(255 255 255 / 0.08);
+  --card-bg: rgba(255 255 255 / 0.04);
+  --nav-bg: rgba(7, 7, 15, 0.85);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
+@media (prefers-color-scheme: light) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --bg: #f8f7ff;
+    --fg: #14122a;
+    --muted: #4a4866;
+    --aurora-from: #0284c7;
+    --aurora-via: #6d28d9;
+    --aurora-to: #be185d;
+    --card-border: rgba(0 0 0 / 0.08);
+    --card-bg: rgba(0 0 0 / 0.03);
+    --nav-bg: rgba(248, 247, 255, 0.85);
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+[data-theme="dark"] {
+  --bg: #07070f;
+  --fg: #f3f2ff;
+  --muted: #b9b8d3;
+  --aurora-from: #38bdf8;
+  --aurora-via: #8b5cf6;
+  --aurora-to: #ec4899;
+  --card-border: rgba(255 255 255 / 0.08);
+  --card-bg: rgba(255 255 255 / 0.04);
+  --nav-bg: rgba(7, 7, 15, 0.85);
 }
 
+[data-theme="light"] {
+  --bg: #f8f7ff;
+  --fg: #14122a;
+  --muted: #4a4866;
+  --aurora-from: #0284c7;
+  --aurora-via: #6d28d9;
+  --aurora-to: #be185d;
+  --card-border: rgba(0 0 0 / 0.08);
+  --card-bg: rgba(0 0 0 / 0.03);
+  --nav-bg: rgba(248, 247, 255, 0.85);
+}
+
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --font-sans: var(--font-dm-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-dm-sans, "DM Sans", sans-serif);
+  transition:
+    background 0.2s ease,
+    color 0.2s ease;
+}
+
+/* ── Orb ──────────────────────────────────────────────────── */
 .origin-orb {
   overflow: hidden;
   box-shadow:
@@ -49,6 +92,7 @@ body {
   }
 }
 
+/* ── Chat panel ───────────────────────────────────────────── */
 .origin-panel {
   animation: origin-panel-in 180ms ease-out;
 }
