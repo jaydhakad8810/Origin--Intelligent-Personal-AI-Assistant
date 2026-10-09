@@ -19,3 +19,5 @@ Approved decisions for Origin.
 - Desktop later via Tauri.
 - Mobile later via Expo or native Android; decided at Phase 8.
 - Shared packages/ folder only when a second client exists.
+- Database: standard PostgreSQL + pgvector, hosted on Neon free for now. No Neon-specific features. Schema lives in Alembic migrations so it is portable.
+- LLM: swappable gateway, chosen by the LLM_PROVIDER setting. Phase 2 development uses Gemini free tier with test data only. Before any real Gmail or Calendar data, switch to a paid provider with a hard spend cap (Claude planned).
