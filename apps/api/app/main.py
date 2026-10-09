@@ -1,12 +1,15 @@
 import os
+import secrets
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import text
+from starlette.middleware.sessions import SessionMiddleware
 
-from app import db
+from app import config, db
+from app.auth import get_current_user, router as auth_router
 
 app = FastAPI(title="Origin API")
 
@@ -19,9 +22,22 @@ cors_origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
+    allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
+
+# Holds only the short-lived Google login state (state, PKCE verifier, nonce).
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=config.SESSION_SECRET or secrets.token_urlsafe(32),
+    session_cookie="origin_oauth",
+    max_age=600,
+    same_site="lax",
+    https_only=config.COOKIE_SECURE,
+)
+
+app.include_router(auth_router)
 
 
 class ChatRequest(BaseModel):
@@ -50,7 +66,7 @@ def health_db():
 
 
 @app.post("/v1/chat", response_model=ChatResponse)
-def chat(body: ChatRequest):
+def chat(body: ChatRequest, user=Depends(get_current_user)):
     return {
         "reply": f'Demo mode. You said: "{body.message}". Real answers arrive once the AI is connected.'
     }

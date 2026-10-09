@@ -1,8 +1,17 @@
+import pytest
 from fastapi.testclient import TestClient
 
+from app.auth import get_current_user
 from app.main import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def signed_in():
+    app.dependency_overrides[get_current_user] = lambda: object()
+    yield
+    app.dependency_overrides.clear()
 
 
 def test_chat_ok():
