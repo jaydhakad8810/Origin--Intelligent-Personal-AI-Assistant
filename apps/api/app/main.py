@@ -1,15 +1,15 @@
 import os
 import secrets
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 from sqlalchemy import text
 from starlette.middleware.sessions import SessionMiddleware
 
 from app import config, db
-from app.auth import get_current_user, router as auth_router
+from app.auth import router as auth_router
+from app.conversations import router as conversations_router
 
 app = FastAPI(title="Origin API")
 
@@ -23,7 +23,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type"],
 )
 
@@ -38,14 +38,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
-
-
-class ChatRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=2000)
-
-
-class ChatResponse(BaseModel):
-    reply: str
+app.include_router(conversations_router)
 
 
 @app.get("/v1/health")
@@ -63,10 +56,3 @@ def health_db():
             status_code=503, content={"status": "error", "database": "down"}
         )
     return {"status": "ok", "database": "up"}
-
-
-@app.post("/v1/chat", response_model=ChatResponse)
-def chat(body: ChatRequest, user=Depends(get_current_user)):
-    return {
-        "reply": f'Demo mode. You said: "{body.message}". Real answers arrive once the AI is connected.'
-    }
