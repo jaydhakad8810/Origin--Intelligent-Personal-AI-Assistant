@@ -17,6 +17,14 @@ type Message = {
   content: string;
 };
 
+type ConversationSummary = {
+  id: string;
+  title: string;
+  updated_at: string;
+};
+
+type LoadState = "idle" | "loading" | "error";
+
 type ChatPanelProps = {
   open: boolean;
   onClose: () => void;
@@ -60,6 +68,13 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
       typeof window !== "undefined" &&
       new URLSearchParams(window.location.search).get("auth_error") === "1",
   );
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [view, setView] = useState<"chat" | "history">("chat");
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [listState, setListState] = useState<LoadState>("idle");
+  const [messagesState, setMessagesState] = useState<LoadState>("idle");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState(false);
   const nextId = useRef(1);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -116,6 +131,27 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
     return () => controller.abort();
   }, [open]);
 
+  // Signed in and open: load the list, open the latest conversation and its messages.
+  useEffect(() => {
+    if (!open || auth !== "signedIn") return;
+    const controller = new AbortController();
+    (async () => {
+      setListState("loading");
+      setMessagesState("idle");
+      try {
+        const list = await fetchConversations(controller.signal);
+        if (!list) return;
+        setConversations(list);
+        setListState("idle");
+        if (list.length > 0) await openConversation(list[0].id, controller.signal);
+      } catch {
+        if (!controller.signal.aborted) setListState("error");
+      }
+    })();
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, auth]);
+
   useEffect(() => {
     if (open && auth === "signedIn") textareaRef.current?.focus();
   }, [open, auth]);
@@ -129,6 +165,103 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
     return () => controllerRef.current?.abort();
   }, []);
 
+  // GET helper: returns the response, or null (and shows the sign-in card) on 401.
+  async function apiGet(path: string, signal: AbortSignal) {
+    const res = await fetch(`${API_URL}${path}`, { credentials: "include", signal });
+    if (res.status === 401) {
+      setAuth("signedOut");
+      setMessages([]);
+      setConversationId(null);
+      return null;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res;
+  }
+
+  async function fetchConversations(signal: AbortSignal) {
+    const res = await apiGet("/v1/conversations", signal);
+    return res ? ((await res.json()) as ConversationSummary[]) : null;
+  }
+
+  async function openConversation(id: string, signal: AbortSignal) {
+    setMessagesState("loading");
+    try {
+      const res = await apiGet(`/v1/conversations/${id}/messages`, signal);
+      if (!res) return;
+      const rows = (await res.json()) as {
+        role: "user" | "assistant";
+        content: string;
+      }[];
+      setMessages(
+        rows.map((r) => ({ id: nextId.current++, role: r.role, content: r.content })),
+      );
+      setConversationId(id);
+      setView("chat");
+      setMessagesState("idle");
+    } catch (error) {
+      if (!signal.aborted) setMessagesState("error");
+      throw error;
+    }
+  }
+
+  function newChat() {
+    controllerRef.current?.abort();
+    setWaiting(false);
+    setMessages([]);
+    setConversationId(null);
+    setMessagesState("idle");
+    setView("chat");
+    textareaRef.current?.focus();
+  }
+
+  async function showHistory() {
+    setView("history");
+    setConfirmDeleteId(null);
+    setDeleteError(false);
+    setListState("loading");
+    try {
+      const list = await fetchConversations(new AbortController().signal);
+      if (!list) return;
+      setConversations(list);
+      setListState("idle");
+    } catch {
+      setListState("error");
+    }
+  }
+
+  async function pickConversation(id: string) {
+    controllerRef.current?.abort();
+    setWaiting(false);
+    try {
+      await openConversation(id, new AbortController().signal);
+    } catch {
+      // messagesState is already "error"; show it in the chat view.
+      setView("chat");
+    }
+  }
+
+  async function deleteConversation(id: string) {
+    setDeleteError(false);
+    try {
+      const res = await fetch(`${API_URL}/v1/conversations/${id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (res.status === 401) {
+        setAuth("signedOut");
+        return;
+      }
+      if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
+    } catch {
+      setDeleteError(true);
+      return;
+    }
+    setConfirmDeleteId(null);
+    setConversations((prev) => prev.filter((c) => c.id !== id));
+    if (id === conversationId) newChat();
+    setView("history");
+  }
+
   async function signOut() {
     try {
       await fetch(`${API_URL}/v1/auth/logout`, {
@@ -139,6 +272,9 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
       // Even if the request fails, show the sign-in card.
     }
     setMessages([]);
+    setConversationId(null);
+    setConversations([]);
+    setView("chat");
     setAuth("signedOut");
   }
 
@@ -161,7 +297,10 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({
+          message: text,
+          ...(conversationId ? { conversation_id: conversationId } : {}),
+        }),
         signal: controller.signal,
       });
       if (res.status === 401) {
@@ -171,8 +310,17 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
         return;
       }
       if (res.ok) {
-        const data = (await res.json()) as { reply?: unknown };
+        const data = (await res.json()) as {
+          reply?: unknown;
+          conversation_id?: unknown;
+        };
         if (typeof data.reply === "string") reply = data.reply;
+        if (typeof data.conversation_id === "string") {
+          setConversationId(data.conversation_id);
+        }
+      } else if (res.status === 404) {
+        // The conversation was deleted elsewhere: start fresh next time.
+        setConversationId(null);
       }
     } catch {
       // Network error, timeout or abort: keep the error text.
@@ -238,6 +386,24 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
           )}
         </h2>
         {auth === "signedIn" && (
+          <>
+            <button
+              type="button"
+              onClick={newChat}
+              className={`rounded-full px-2 py-1 text-xs text-zinc-300 hover:bg-white/10 ${focusRing}`}
+            >
+              New chat
+            </button>
+            <button
+              type="button"
+              onClick={() => (view === "history" ? setView("chat") : showHistory())}
+              className={`rounded-full px-2 py-1 text-xs text-zinc-300 hover:bg-white/10 ${focusRing}`}
+            >
+              {view === "history" ? "Back" : "History"}
+            </button>
+          </>
+        )}
+        {auth === "signedIn" && (
           <button
             type="button"
             onClick={signOut}
@@ -277,6 +443,88 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
             </>
           )}
         </div>
+      ) : view === "history" ? (
+        <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-4 py-4">
+          {listState === "loading" ? (
+            <p className="m-auto text-sm text-zinc-400">Loading...</p>
+          ) : listState === "error" ? (
+            <div className="m-auto text-center">
+              <p role="alert" className="text-sm text-red-300">
+                Could not load history.
+              </p>
+              <button
+                type="button"
+                onClick={showHistory}
+                className={`mt-2 rounded-full border border-white/10 px-3 py-1 text-xs ${focusRing}`}
+              >
+                Try again
+              </button>
+            </div>
+          ) : conversations.length === 0 ? (
+            <p className="m-auto text-sm text-zinc-400">No conversations yet.</p>
+          ) : (
+            conversations.map((c) => (
+              <div
+                key={c.id}
+                className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+              >
+                {confirmDeleteId === c.id ? (
+                  <>
+                    <p className="flex-1 text-xs text-zinc-200">
+                      Delete permanently?
+                      {deleteError && (
+                        <span role="alert" className="block text-red-300">
+                          Delete failed. Try again.
+                        </span>
+                      )}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => deleteConversation(c.id)}
+                      className={`rounded-full bg-red-500/80 px-3 py-1 text-xs text-white ${focusRing}`}
+                    >
+                      Delete
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConfirmDeleteId(null);
+                        setDeleteError(false);
+                      }}
+                      className={`rounded-full px-3 py-1 text-xs text-zinc-300 hover:bg-white/10 ${focusRing}`}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => pickConversation(c.id)}
+                      className={`min-w-0 flex-1 text-left ${focusRing}`}
+                    >
+                      <span className="block truncate text-sm">{c.title}</span>
+                      <span className="block text-xs text-zinc-400">
+                        {new Date(c.updated_at).toLocaleString()}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConfirmDeleteId(c.id);
+                        setDeleteError(false);
+                      }}
+                      aria-label={`Delete conversation ${c.title}`}
+                      className={`rounded-full px-2 py-1 text-xs text-zinc-300 hover:bg-white/10 ${focusRing}`}
+                    >
+                      Delete
+                    </button>
+                  </>
+                )}
+              </div>
+            ))
+          )}
+        </div>
       ) : (
         <>
       <div
@@ -284,7 +532,13 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
         className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 py-4"
         aria-live="polite"
       >
-        {messages.length === 0 && !waiting ? (
+        {messagesState === "loading" || listState === "loading" ? (
+          <p className="m-auto text-sm text-zinc-400">Loading...</p>
+        ) : messagesState === "error" || listState === "error" ? (
+          <p role="alert" className="m-auto text-sm text-red-300">
+            Could not load your chat.
+          </p>
+        ) : messages.length === 0 && !waiting ? (
           <p className="m-auto text-sm text-zinc-400">How can I help you?</p>
         ) : (
           messages.map((m) => (

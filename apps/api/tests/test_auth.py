@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from app.auth import COOKIE_NAME, get_current_user
 from app.db import get_db
 from app.main import app
+from app.models import User
 
 
 def fake_user():
@@ -72,8 +73,12 @@ def test_chat_401_anonymous():
     assert response.status_code == 401
 
 
-def test_chat_200_authenticated():
-    app.dependency_overrides[get_current_user] = fake_user
+def test_chat_200_authenticated(sqlite_session):
+    user = User(email="a@example.com")
+    sqlite_session.add(user)
+    sqlite_session.commit()
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_db] = lambda: sqlite_session
     response = TestClient(app).post("/v1/chat", json={"message": "hi"})
     assert response.status_code == 200
     assert "reply" in response.json()

@@ -25,3 +25,4 @@ Approved decisions for Origin.
 - Sessions are server-side: the browser holds a random token in an HttpOnly cookie (origin_session); only its sha256 hash is stored in the database.
 - Google scopes are openid, email and profile only. Gmail and Calendar scopes are added later, incrementally, when those features need them.
 - Production: the web and API must share a parent domain (or sit behind one proxy) so the session cookie is sent; set COOKIE_SECURE=true on HTTPS.
+- Chat history is stored per user. The user can delete any of their conversations. Deletes are permanent and cascade to the messages inside.
