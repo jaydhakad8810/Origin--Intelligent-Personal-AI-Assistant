@@ -14,3 +14,8 @@ Approved decisions for Origin.
 - Hosting: Vercel free for web; free hosted Postgres with pgvector for DB (decide before Task 3). No Docker for now.
 - Solo developer; one branch per task after first commit.
 - Reminder delivery: browser/PWA push plus in-app.
+- One backend for all clients; versioned /v1 API; no business logic in clients.
+- Web is an installable PWA.
+- Desktop later via Tauri.
+- Mobile later via Expo or native Android; decided at Phase 8.
+- Shared packages/ folder only when a second client exists.
