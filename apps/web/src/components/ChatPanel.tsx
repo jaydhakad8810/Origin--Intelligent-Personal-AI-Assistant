@@ -23,6 +23,8 @@ type ChatPanelProps = {
   orbRef: React.RefObject<HTMLButtonElement | null>;
 };
 
+type AuthState = "loading" | "signedOut" | "signedIn";
+
 type PanelPosition = { x: number; y: number; height: number };
 
 // Opens above the orb if there is room, otherwise below, always inside the viewport.
@@ -51,6 +53,13 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const [waiting, setWaiting] = useState(false);
   const [position, setPosition] = useState<PanelPosition | null>(null);
+  const [auth, setAuth] = useState<AuthState>("loading");
+  const [userName, setUserName] = useState("");
+  const [authError] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("auth_error") === "1",
+  );
   const nextId = useRef(1);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -68,9 +77,48 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
     return () => window.removeEventListener("resize", place);
   }, [open, orbRef]);
 
+  // Show "Sign-in failed" once if Google sent us back with ?auth_error=1, then clean the URL.
   useEffect(() => {
-    if (open) textareaRef.current?.focus();
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("auth_error") === "1") {
+      url.searchParams.delete("auth_error");
+      window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+    }
+  }, []);
+
+  // Ask the API who is signed in each time the panel opens.
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const res = await fetch(`${API_URL}/v1/auth/me`, {
+          credentials: "include",
+          signal: controller.signal,
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { name?: unknown; email?: unknown };
+          setUserName(
+            typeof data.name === "string" && data.name
+              ? data.name
+              : typeof data.email === "string"
+                ? data.email
+                : "",
+          );
+          setAuth("signedIn");
+        } else {
+          setAuth("signedOut");
+        }
+      } catch {
+        if (!controller.signal.aborted) setAuth("signedOut");
+      }
+    })();
+    return () => controller.abort();
   }, [open]);
+
+  useEffect(() => {
+    if (open && auth === "signedIn") textareaRef.current?.focus();
+  }, [open, auth]);
 
   useEffect(() => {
     const body = bodyRef.current;
@@ -80,6 +128,19 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
   useEffect(() => {
     return () => controllerRef.current?.abort();
   }, []);
+
+  async function signOut() {
+    try {
+      await fetch(`${API_URL}/v1/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch {
+      // Even if the request fails, show the sign-in card.
+    }
+    setMessages([]);
+    setAuth("signedOut");
+  }
 
   async function send() {
     const text = draft.trim();
@@ -98,10 +159,17 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
     try {
       const res = await fetch(`${API_URL}/v1/chat`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text }),
         signal: controller.signal,
       });
+      if (res.status === 401) {
+        setAuth("signedOut");
+        setMessages([]);
+        setWaiting(false);
+        return;
+      }
       if (res.ok) {
         const data = (await res.json()) as { reply?: unknown };
         if (typeof data.reply === "string") reply = data.reply;
@@ -163,7 +231,21 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
           draggable={false}
           className="h-8 w-8 rounded-full object-cover"
         />
-        <h2 className="flex-1 text-sm font-semibold tracking-wide">Origin</h2>
+        <h2 className="flex-1 truncate text-sm font-semibold tracking-wide">
+          Origin
+          {auth === "signedIn" && userName && (
+            <span className="ml-2 font-normal text-zinc-300">{userName}</span>
+          )}
+        </h2>
+        {auth === "signedIn" && (
+          <button
+            type="button"
+            onClick={signOut}
+            className={`rounded-full px-3 py-1 text-xs text-zinc-300 hover:bg-white/10 ${focusRing}`}
+          >
+            Sign out
+          </button>
+        )}
         <button
           type="button"
           onClick={onClose}
@@ -174,6 +256,29 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
         </button>
       </header>
 
+      {auth !== "signedIn" ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
+          {auth === "loading" ? (
+            <p className="text-sm text-zinc-400">Loading...</p>
+          ) : (
+            <>
+              {authError && (
+                <p role="alert" className="text-sm text-red-300">
+                  Sign-in failed. Try again.
+                </p>
+              )}
+              <p className="text-sm text-zinc-300">Sign in to chat with Origin.</p>
+              <a
+                href={`${API_URL}/v1/auth/google/login`}
+                className={`rounded-xl bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 px-4 py-2 text-sm font-medium text-white ${focusRing}`}
+              >
+                Sign in with Google
+              </a>
+            </>
+          )}
+        </div>
+      ) : (
+        <>
       <div
         ref={bodyRef}
         className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 py-4"
@@ -236,6 +341,8 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
           </button>
         </div>
       </footer>
+        </>
+      )}
     </div>
   );
 }
