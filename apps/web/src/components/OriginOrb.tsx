@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useImperativeHandle, useRef } from "react";
 
 const ORB_SIZE = 64;
 const EDGE_MARGIN = 8;
@@ -11,6 +11,7 @@ type Position = { x: number; y: number };
 
 type OriginOrbProps = {
   onClick?: () => void;
+  orbRef?: React.RefObject<HTMLButtonElement | null>;
 };
 
 function clampToViewport(position: Position): Position {
@@ -44,8 +45,10 @@ function savePosition(position: Position) {
   }
 }
 
-export default function OriginOrb({ onClick = () => {} }: OriginOrbProps) {
+export default function OriginOrb({ onClick = () => {}, orbRef }: OriginOrbProps) {
   const buttonRef = useRef<HTMLButtonElement>(null);
+  // Let the parent read the button (for panel placement and returning focus).
+  useImperativeHandle(orbRef, () => buttonRef.current as HTMLButtonElement);
   // Position the user chose. null means "use the default bottom-right from CSS".
   const positionRef = useRef<Position | null>(null);
   const dragRef = useRef<{

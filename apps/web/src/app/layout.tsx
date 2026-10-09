@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import OriginOrb from "@/components/OriginOrb";
+import OriginAssistant from "@/components/OriginAssistant";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -26,7 +26,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     >
       <body className="min-h-full flex flex-col">
         {children}
-        <OriginOrb />
+        <OriginAssistant />
       </body>
     </html>
   );
