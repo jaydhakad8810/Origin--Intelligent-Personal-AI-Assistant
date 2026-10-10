@@ -8,12 +8,17 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.db import get_db
+from app.llm import limiter
+from app.llm.base import LLMError
+from app.llm.factory import get_provider
 from app.models import Conversation, Message, User
 
 router = APIRouter(prefix="/v1")
 
 TITLE_LENGTH = 40
 LIST_LIMIT = 50
+HISTORY_LIMIT = 20
+LLM_ERROR_MESSAGE = "Sorry, the assistant is unavailable right now. Please try again later."
 
 
 class ChatRequest(BaseModel):
@@ -90,6 +95,34 @@ def chat(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # Check the existing conversation first, then ask the AI, and only then
+    # save anything. A failure leaves no half-saved chat.
+    history = []
+    if body.conversation_id is not None:
+        existing = _own_conversation(db, user, body.conversation_id)
+        rows = db.execute(
+            select(Message)
+            .where(Message.conversation_id == existing.id, Message.user_id == user.id)
+            .order_by(Message.created_at.desc())
+            .limit(HISTORY_LIMIT)
+        ).scalars()
+        history = [{"role": m.role, "content": m.content} for m in reversed(list(rows))]
+
+    try:
+        limiter.check_and_count(user.id)
+    except limiter.DailyLimitExceeded as e:
+        raise HTTPException(status_code=429, detail=str(e))
+
+    try:
+        reply = get_provider().generate(
+            history + [{"role": "user", "content": body.message}], None
+        )
+    except LLMError:
+        raise HTTPException(status_code=502, detail=LLM_ERROR_MESSAGE)
+    except Exception:
+        # Never leak provider details (or keys) to the client.
+        raise HTTPException(status_code=502, detail=LLM_ERROR_MESSAGE)
+
     now = datetime.now(timezone.utc)
     if body.conversation_id is None:
         conversation = Conversation(
@@ -101,9 +134,8 @@ def chat(
         db.add(conversation)
         db.flush()
     else:
-        conversation = _own_conversation(db, user, body.conversation_id)
+        conversation = existing
 
-    reply = f'Demo mode. You said: "{body.message}". Real answers arrive once the AI is connected.'
     db.add(
         Message(
             conversation_id=conversation.id,
