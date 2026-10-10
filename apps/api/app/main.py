@@ -10,6 +10,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app import config, db
 from app.auth import router as auth_router
 from app.conversations import router as conversations_router
+from app.email import router as email_router
 from app.notes import router as notes_router
 
 app = FastAPI(title="Origin API")
@@ -41,6 +42,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(conversations_router)
 app.include_router(notes_router)
+app.include_router(email_router)
 
 
 @app.get("/v1/health")
