@@ -23,6 +23,19 @@ type ConversationSummary = {
   updated_at: string;
 };
 
+type NoteItem = {
+  id: string;
+  title: string;
+  content: string;
+  updated_at: string;
+};
+
+// id null = a new note that is not saved yet.
+type NoteDraft = { id: string | null; title: string; content: string };
+
+const NOTE_TITLE_MAX = 200;
+const NOTE_CONTENT_MAX = 10000;
+
 type LoadState = "idle" | "loading" | "error";
 
 type ChatPanelProps = {
@@ -69,7 +82,13 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
       new URLSearchParams(window.location.search).get("auth_error") === "1",
   );
   const [conversationId, setConversationId] = useState<string | null>(null);
-  const [view, setView] = useState<"chat" | "history">("chat");
+  const [view, setView] = useState<"chat" | "history" | "notes">("chat");
+  const [notes, setNotes] = useState<NoteItem[]>([]);
+  const [notesState, setNotesState] = useState<LoadState>("idle");
+  const [noteDraft, setNoteDraft] = useState<NoteDraft | null>(null);
+  const [noteSaving, setNoteSaving] = useState(false);
+  const [noteError, setNoteError] = useState("");
+  const [confirmDeleteNoteId, setConfirmDeleteNoteId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [listState, setListState] = useState<LoadState>("idle");
   const [messagesState, setMessagesState] = useState<LoadState>("idle");
@@ -262,6 +281,91 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
     setView("history");
   }
 
+  async function showNotes() {
+    setView("notes");
+    setNoteDraft(null);
+    setNoteError("");
+    setConfirmDeleteNoteId(null);
+    setNotesState("loading");
+    try {
+      const res = await fetch(`${API_URL}/v1/notes`, { credentials: "include" });
+      if (res.status === 401) {
+        setAuth("signedOut");
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setNotes((await res.json()) as NoteItem[]);
+      setNotesState("idle");
+    } catch {
+      setNotesState("error");
+    }
+  }
+
+  // Saves the open note (create or update). Shows a friendly message on failure.
+  async function saveNote() {
+    if (!noteDraft || noteSaving) return;
+    if (!noteDraft.title.trim() && !noteDraft.content.trim()) {
+      setNoteError("A note needs a title or some text.");
+      return;
+    }
+    setNoteSaving(true);
+    setNoteError("");
+    try {
+      const isNew = noteDraft.id === null;
+      const res = await fetch(
+        `${API_URL}/v1/notes${isNew ? "" : `/${noteDraft.id}`}`,
+        {
+          method: isNew ? "POST" : "PATCH",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: noteDraft.title, content: noteDraft.content }),
+        },
+      );
+      if (res.status === 401) {
+        setAuth("signedOut");
+        return;
+      }
+      if (res.status === 404) {
+        setNoteError("This note no longer exists.");
+        return;
+      }
+      if (res.status === 422) {
+        setNoteError("Please check the note: it needs a title or text, and must not be too long.");
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const saved = (await res.json()) as NoteItem;
+      setNotes((prev) =>
+        isNew ? [saved, ...prev] : prev.map((n) => (n.id === saved.id ? saved : n)),
+      );
+      setNoteDraft(null);
+    } catch {
+      setNoteError("Could not save the note. Try again.");
+    } finally {
+      setNoteSaving(false);
+    }
+  }
+
+  async function deleteNote(id: string) {
+    setNoteError("");
+    try {
+      const res = await fetch(`${API_URL}/v1/notes/${id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (res.status === 401) {
+        setAuth("signedOut");
+        return;
+      }
+      if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
+    } catch {
+      setNoteError("Delete failed. Try again.");
+      return;
+    }
+    setConfirmDeleteNoteId(null);
+    setNotes((prev) => prev.filter((n) => n.id !== id));
+  }
+
   async function signOut() {
     try {
       await fetch(`${API_URL}/v1/auth/logout`, {
@@ -274,6 +378,8 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
     setMessages([]);
     setConversationId(null);
     setConversations([]);
+    setNotes([]);
+    setNoteDraft(null);
     setView("chat");
     setAuth("signedOut");
   }
@@ -396,10 +502,10 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
             </button>
             <button
               type="button"
-              onClick={() => (view === "history" ? setView("chat") : showHistory())}
+              onClick={() => (view !== "chat" ? setView("chat") : showHistory())}
               className={`rounded-full px-2 py-1 text-xs text-zinc-300 hover:bg-white/10 ${focusRing}`}
             >
-              {view === "history" ? "Back" : "History"}
+              {view !== "chat" ? "Back" : "History"}
             </button>
           </>
         )}
@@ -440,6 +546,149 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
               >
                 Sign in with Google
               </a>
+            </>
+          )}
+        </div>
+      ) : view === "notes" ? (
+        <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-4 py-4">
+          {noteDraft ? (
+            <>
+              <input
+                value={noteDraft.title}
+                onChange={(e) => setNoteDraft({ ...noteDraft, title: e.target.value })}
+                maxLength={NOTE_TITLE_MAX}
+                aria-label="Note title"
+                placeholder="Title"
+                className={`rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 ${focusRing}`}
+              />
+              <textarea
+                value={noteDraft.content}
+                onChange={(e) => setNoteDraft({ ...noteDraft, content: e.target.value })}
+                maxLength={NOTE_CONTENT_MAX}
+                aria-label="Note text"
+                placeholder="Write your note..."
+                className={`min-h-[160px] flex-1 resize-none rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 ${focusRing}`}
+              />
+              {noteError && (
+                <p role="alert" className="text-xs text-red-300">
+                  {noteError}
+                </p>
+              )}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNoteDraft(null);
+                    setNoteError("");
+                  }}
+                  className={`rounded-full px-3 py-1 text-xs text-zinc-300 hover:bg-white/10 ${focusRing}`}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={saveNote}
+                  disabled={noteSaving}
+                  className={`rounded-full bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 px-4 py-1 text-xs font-medium text-white disabled:opacity-40 ${focusRing}`}
+                >
+                  {noteSaving ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </>
+          ) : notesState === "loading" ? (
+            <p className="m-auto text-sm text-zinc-400">Loading...</p>
+          ) : notesState === "error" ? (
+            <div className="m-auto text-center">
+              <p role="alert" className="text-sm text-red-300">
+                Could not load notes.
+              </p>
+              <button
+                type="button"
+                onClick={showNotes}
+                className={`mt-2 rounded-full border border-white/10 px-3 py-1 text-xs ${focusRing}`}
+              >
+                Try again
+              </button>
+            </div>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setNoteDraft({ id: null, title: "", content: "" });
+                  setNoteError("");
+                }}
+                className={`self-start rounded-full border border-white/10 px-3 py-1 text-xs text-zinc-200 hover:bg-white/10 ${focusRing}`}
+              >
+                New note
+              </button>
+              {noteError && (
+                <p role="alert" className="text-xs text-red-300">
+                  {noteError}
+                </p>
+              )}
+              {notes.length === 0 ? (
+                <p className="m-auto text-sm text-zinc-400">No notes yet.</p>
+              ) : (
+                notes.map((n) => (
+                  <div
+                    key={n.id}
+                    className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+                  >
+                    {confirmDeleteNoteId === n.id ? (
+                      <>
+                        <p className="flex-1 text-xs text-zinc-200">Delete permanently?</p>
+                        <button
+                          type="button"
+                          onClick={() => deleteNote(n.id)}
+                          className={`rounded-full bg-red-500/80 px-3 py-1 text-xs text-white ${focusRing}`}
+                        >
+                          Delete
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmDeleteNoteId(null);
+                            setNoteError("");
+                          }}
+                          className={`rounded-full px-3 py-1 text-xs text-zinc-300 hover:bg-white/10 ${focusRing}`}
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNoteDraft({ id: n.id, title: n.title, content: n.content });
+                            setNoteError("");
+                          }}
+                          className={`min-w-0 flex-1 text-left ${focusRing}`}
+                        >
+                          <span className="block truncate text-sm">
+                            {n.title || n.content}
+                          </span>
+                          <span className="block text-xs text-zinc-400">
+                            {new Date(n.updated_at).toLocaleString()}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmDeleteNoteId(n.id);
+                            setNoteError("");
+                          }}
+                          aria-label={`Delete note ${n.title || n.content.slice(0, 30)}`}
+                          className={`rounded-full px-2 py-1 text-xs text-zinc-300 hover:bg-white/10 ${focusRing}`}
+                        >
+                          Delete
+                        </button>
+                      </>
+                    )}
+                  </div>
+                ))
+              )}
             </>
           )}
         </div>
@@ -561,17 +810,28 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
 
       <footer className="border-t border-white/10 px-4 py-3">
         <div className="mb-2 flex gap-2">
-          {CHIPS.map((chip) => (
-            <button
-              key={chip}
-              type="button"
-              disabled
-              title="Coming soon"
-              className="cursor-not-allowed rounded-full border border-white/10 px-3 py-1 text-xs text-zinc-500"
-            >
-              {chip}
-            </button>
-          ))}
+          {CHIPS.map((chip) =>
+            chip === "Note" ? (
+              <button
+                key={chip}
+                type="button"
+                onClick={showNotes}
+                className={`rounded-full border border-white/10 px-3 py-1 text-xs text-zinc-200 hover:bg-white/10 ${focusRing}`}
+              >
+                {chip}
+              </button>
+            ) : (
+              <button
+                key={chip}
+                type="button"
+                disabled
+                title="Coming soon"
+                className="cursor-not-allowed rounded-full border border-white/10 px-3 py-1 text-xs text-zinc-500"
+              >
+                {chip}
+              </button>
+            ),
+          )}
         </div>
         <div className="flex items-end gap-2">
           <textarea
