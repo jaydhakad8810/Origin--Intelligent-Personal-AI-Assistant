@@ -67,7 +67,13 @@ function computePosition(orb: DOMRect): PanelPosition {
   return { x, y, height };
 }
 
-const CHIPS = ["Note", "Tasks", "Calendar"];
+const EMAIL_MAX = 5000;
+const MAILTO_BODY_MAX = 1800;
+const EMAIL_TIMEOUT_MS = 60000;
+const TONES = ["formal", "professional", "friendly"] as const;
+type Tone = (typeof TONES)[number];
+
+const CHIPS = ["Note", "Email", "Tasks", "Calendar"];
 
 export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -82,7 +88,15 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
       new URLSearchParams(window.location.search).get("auth_error") === "1",
   );
   const [conversationId, setConversationId] = useState<string | null>(null);
-  const [view, setView] = useState<"chat" | "history" | "notes">("chat");
+  const [view, setView] = useState<"chat" | "history" | "notes" | "email">("chat");
+  const [emailText, setEmailText] = useState("");
+  const [emailTone, setEmailTone] = useState<Tone>("professional");
+  const [emailSubject, setEmailSubject] = useState("");
+  const [emailBody, setEmailBody] = useState("");
+  const [emailHasResult, setEmailHasResult] = useState(false);
+  const [emailLoading, setEmailLoading] = useState(false);
+  const [emailError, setEmailError] = useState("");
+  const [emailCopied, setEmailCopied] = useState(false);
   const [notes, setNotes] = useState<NoteItem[]>([]);
   const [notesState, setNotesState] = useState<LoadState>("idle");
   const [noteDraft, setNoteDraft] = useState<NoteDraft | null>(null);
@@ -366,6 +380,67 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
     setNotes((prev) => prev.filter((n) => n.id !== id));
   }
 
+  async function polishEmail() {
+    const text = emailText.trim();
+    if (!text || emailLoading) return;
+    setEmailLoading(true);
+    setEmailError("");
+    setEmailCopied(false);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), EMAIL_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${API_URL}/v1/email/polish`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, tone: emailTone }),
+        signal: controller.signal,
+      });
+      if (res.status === 401) {
+        setAuth("signedOut");
+        return;
+      }
+      if (res.status === 422) {
+        setEmailError("Please write something, up to 5000 characters.");
+        return;
+      }
+      if (res.status === 429) {
+        setEmailError("You have reached today's limit. Please try again tomorrow.");
+        return;
+      }
+      if (res.status === 502) {
+        setEmailError("Sorry, the assistant is unavailable right now. Please try again later.");
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as { subject?: unknown; body?: unknown };
+      setEmailSubject(typeof data.subject === "string" ? data.subject : "");
+      setEmailBody(typeof data.body === "string" ? data.body : "");
+      setEmailHasResult(true);
+    } catch {
+      setEmailError(ERROR_TEXT);
+    } finally {
+      window.clearTimeout(timeout);
+      setEmailLoading(false);
+    }
+  }
+
+  async function copyEmail() {
+    const full = emailSubject ? `Subject: ${emailSubject}\n\n${emailBody}` : emailBody;
+    try {
+      await navigator.clipboard.writeText(full);
+      setEmailCopied(true);
+      window.setTimeout(() => setEmailCopied(false), 2000);
+    } catch {
+      setEmailError("Could not copy. Select the text and copy it yourself.");
+    }
+  }
+
+  function showEmail() {
+    setView("email");
+    setEmailError("");
+  }
+
   async function signOut() {
     try {
       await fetch(`${API_URL}/v1/auth/logout`, {
@@ -380,6 +455,11 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
     setConversations([]);
     setNotes([]);
     setNoteDraft(null);
+    setEmailText("");
+    setEmailSubject("");
+    setEmailBody("");
+    setEmailHasResult(false);
+    setEmailError("");
     setView("chat");
     setAuth("signedOut");
   }
@@ -546,6 +626,98 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
               >
                 Sign in with Google
               </a>
+            </>
+          )}
+        </div>
+      ) : view === "email" ? (
+        <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-4 py-4">
+          <p className="text-xs text-zinc-400">
+            Origin never sends this. You send it yourself.
+          </p>
+          <p className="text-xs text-amber-300">Early demo: use sample text only.</p>
+          <textarea
+            value={emailText}
+            onChange={(e) => setEmailText(e.target.value)}
+            maxLength={EMAIL_MAX}
+            rows={5}
+            aria-label="Rough email"
+            placeholder="Write your rough email..."
+            className={`min-h-[110px] resize-none rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 ${focusRing}`}
+          />
+          <div className="flex items-center gap-2">
+            {TONES.map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setEmailTone(t)}
+                aria-pressed={emailTone === t}
+                className={`rounded-full border px-3 py-1 text-xs capitalize ${
+                  emailTone === t
+                    ? "border-fuchsia-400 bg-white/10 text-zinc-100"
+                    : "border-white/10 text-zinc-300 hover:bg-white/10"
+                } ${focusRing}`}
+              >
+                {t}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={polishEmail}
+              disabled={emailLoading || !emailText.trim()}
+              className={`ml-auto rounded-full bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 px-4 py-1 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`}
+            >
+              {emailLoading ? "Polishing..." : "Polish"}
+            </button>
+          </div>
+          {emailError && (
+            <p role="alert" className="text-xs text-red-300">
+              {emailError}
+            </p>
+          )}
+          {emailHasResult && (
+            <>
+              <input
+                value={emailSubject}
+                onChange={(e) => setEmailSubject(e.target.value)}
+                aria-label="Email subject"
+                placeholder="Subject"
+                className={`rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 ${focusRing}`}
+              />
+              <textarea
+                value={emailBody}
+                onChange={(e) => setEmailBody(e.target.value)}
+                rows={8}
+                aria-label="Email body"
+                className={`min-h-[140px] resize-none rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 ${focusRing}`}
+              />
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                {emailBody.length > MAILTO_BODY_MAX && (
+                  <span className="mr-auto text-xs text-zinc-400">Too long, use Copy</span>
+                )}
+                <button
+                  type="button"
+                  onClick={copyEmail}
+                  className={`rounded-full border border-white/10 px-3 py-1 text-xs text-zinc-200 hover:bg-white/10 ${focusRing}`}
+                >
+                  {emailCopied ? "Copied" : "Copy"}
+                </button>
+                {emailBody.length > MAILTO_BODY_MAX ? (
+                  <button
+                    type="button"
+                    disabled
+                    className="cursor-not-allowed rounded-full border border-white/10 px-3 py-1 text-xs text-zinc-500"
+                  >
+                    Open in mail app
+                  </button>
+                ) : (
+                  <a
+                    href={`mailto:?subject=${encodeURIComponent(emailSubject)}&body=${encodeURIComponent(emailBody)}`}
+                    className={`rounded-full border border-white/10 px-3 py-1 text-xs text-zinc-200 hover:bg-white/10 ${focusRing}`}
+                  >
+                    Open in mail app
+                  </a>
+                )}
+              </div>
             </>
           )}
         </div>
@@ -811,11 +983,11 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
       <footer className="border-t border-white/10 px-4 py-3">
         <div className="mb-2 flex gap-2">
           {CHIPS.map((chip) =>
-            chip === "Note" ? (
+            chip === "Note" || chip === "Email" ? (
               <button
                 key={chip}
                 type="button"
-                onClick={showNotes}
+                onClick={chip === "Note" ? showNotes : showEmail}
                 className={`rounded-full border border-white/10 px-3 py-1 text-xs text-zinc-200 hover:bg-white/10 ${focusRing}`}
               >
                 {chip}
