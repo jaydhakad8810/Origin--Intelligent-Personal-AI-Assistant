@@ -6,6 +6,14 @@ from sqlalchemy.pool import StaticPool
 from app.models import Base
 
 
+@pytest.fixture(autouse=True)
+def demo_llm(monkeypatch):
+    """Tests never use a real provider, whatever .env says."""
+    from app import config
+
+    monkeypatch.setattr(config, "LLM_PROVIDER", "demo")
+
+
 @pytest.fixture
 def sqlite_session():
     """In-memory SQLite with the real models and foreign keys switched on."""

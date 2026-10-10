@@ -27,3 +27,4 @@ Approved decisions for Origin.
 - Production: the web and API must share a parent domain (or sit behind one proxy) so the session cookie is sent; set COOKIE_SECURE=true on HTTPS.
 - Chat history is stored per user. The user can delete any of their conversations. Deletes are permanent and cascade to the messages inside.
 - LLM: Gemini free tier first, test data only. Later swap through gateway; no model trained from scratch; open-weight model possible. Email stays summarize only. Email polish feature approved: user types rough mail, Origin rewrites formal, user sends it. No Gmail send or compose scope.
+- LLM: Gemini via REST generateContent with httpx. Model name only from GEMINI_MODEL env. Free tier, test data only.
