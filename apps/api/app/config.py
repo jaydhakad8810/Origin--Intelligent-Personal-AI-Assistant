@@ -19,3 +19,13 @@ COOKIE_SECURE = (os.getenv("COOKIE_SECURE") or "false").strip().lower() in (
     "true",
     "yes",
 )
+
+# LLM gateway. "demo" needs no key and no network.
+LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or "demo").strip().lower()
+try:
+    LLM_DAILY_LIMIT = int(os.getenv("LLM_DAILY_LIMIT") or 50)
+except ValueError:
+    LLM_DAILY_LIMIT = 50
+# Placeholders for the Gemini provider (not used yet). Never log or return these.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL")
