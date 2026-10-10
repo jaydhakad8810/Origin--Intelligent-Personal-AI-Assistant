@@ -11,6 +11,7 @@ from app.db import get_db
 from app.llm import limiter
 from app.llm.base import LLMError
 from app.llm.factory import get_provider
+from app.llm.prompts import DEFAULT_SYSTEM_PROMPT
 from app.models import Conversation, Message, User
 
 router = APIRouter(prefix="/v1")
@@ -115,7 +116,8 @@ def chat(
 
     try:
         reply = get_provider().generate(
-            history + [{"role": "user", "content": body.message}], None
+            history + [{"role": "user", "content": body.message}],
+            DEFAULT_SYSTEM_PROMPT,
         )
     except LLMError:
         raise HTTPException(status_code=502, detail=LLM_ERROR_MESSAGE)
