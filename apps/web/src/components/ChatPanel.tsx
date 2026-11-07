@@ -1,6 +1,67 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+
+const VOICE_LANG = "en-IN";
+
+// Minimal types for the browser Web Speech API (not in the default TS lib).
+type SpeechRecognitionResultLike = { isFinal: boolean; 0: { transcript: string } };
+type SpeechRecognitionEventLike = {
+  results: ArrayLike<SpeechRecognitionResultLike>;
+};
+type SpeechRecognitionErrorLike = { error: string; message?: string };
+type SpeechRecognitionLike = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  onresult: ((e: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((e: SpeechRecognitionErrorLike) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
+type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
+
+function getSpeechRecognition(): SpeechRecognitionCtor | null {
+  if (typeof window === "undefined") return null;
+  const w = window as unknown as {
+    SpeechRecognition?: SpeechRecognitionCtor;
+    webkitSpeechRecognition?: SpeechRecognitionCtor;
+  };
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
+}
+
+const noopSubscribe = () => () => {};
+
+const IS_DEV = process.env.NODE_ENV === "development";
+
+function voiceErrorText(code: string): string {
+  let text: string;
+  switch (code) {
+    case "not-allowed":
+      text = "Mic is blocked. Allow it in the browser address bar.";
+      break;
+    case "service-not-allowed":
+      text = "Voice service is blocked by the browser.";
+      break;
+    case "audio-capture":
+      text = "No microphone found.";
+      break;
+    case "no-speech":
+      text = "Didn't catch that. Try again.";
+      break;
+    case "network":
+      text = "Voice service unreachable.";
+      break;
+    case "language-not-supported":
+      text = "Voice language not supported.";
+      break;
+    default:
+      text = "Voice input stopped. Try again.";
+  }
+  return IS_DEV ? `${text} (${code})` : text;
+}
 
 const PANEL_WIDTH = 380;
 const PANEL_HEIGHT = 520;
@@ -112,6 +173,89 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<AbortController | null>(null);
+  const [listening, setListening] = useState(false);
+  const [voiceError, setVoiceError] = useState("");
+  const voiceSupported = useSyncExternalStore(
+    noopSubscribe,
+    () => getSpeechRecognition() !== null,
+    () => false,
+  );
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+
+  // Stops listening at once and ignores any late results.
+  function abortVoice() {
+    const rec = recognitionRef.current;
+    recognitionRef.current = null;
+    if (rec) {
+      rec.onresult = null;
+      rec.onerror = null;
+      rec.onend = null;
+      try {
+        rec.abort();
+      } catch {
+        // Already stopped.
+      }
+    }
+    setListening(false);
+  }
+
+  function toggleVoice() {
+    if (recognitionRef.current) {
+      // Graceful stop: a final result may still arrive before onend.
+      recognitionRef.current.stop();
+      return;
+    }
+    const Ctor = getSpeechRecognition();
+    if (!Ctor) return;
+    const rec = new Ctor();
+    rec.lang = VOICE_LANG;
+    rec.continuous = true;
+    rec.interimResults = true;
+    const base = draft && !/\s$/.test(draft) ? `${draft} ` : draft;
+    rec.onresult = (e) => {
+      let spoken = "";
+      for (let i = 0; i < e.results.length; i++) spoken += e.results[i][0].transcript;
+      setDraft((base + spoken).slice(0, MAX_LENGTH));
+    };
+    rec.onerror = (event) => {
+      if (IS_DEV) console.warn("voice error", event.error, event.message);
+      if (event.error === "aborted") return;
+      const e = event;
+      setVoiceError(voiceErrorText(e.error));
+    };
+    rec.onend = () => {
+      if (recognitionRef.current === rec) recognitionRef.current = null;
+      setListening(false);
+    };
+    setVoiceError("");
+    recognitionRef.current = rec;
+    try {
+      rec.start();
+      setListening(true);
+    } catch {
+      recognitionRef.current = null;
+      setVoiceError(voiceErrorText("other"));
+    }
+  }
+
+  // Stop listening when the panel closes, the view changes, or we unmount.
+  useEffect(() => {
+    if (!open || auth !== "signedIn" || view !== "chat") abortVoice();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, auth, view]);
+
+  useEffect(() => {
+    return () => {
+      const rec = recognitionRef.current;
+      recognitionRef.current = null;
+      if (rec) {
+        rec.onresult = null;
+        rec.onerror = null;
+        rec.onend = null;
+        rec.abort();
+      }
+    };
+  }, []);
 
   // Place the panel next to the orb whenever it opens or the window resizes.
   useEffect(() => {
@@ -467,6 +611,8 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
   async function send() {
     const text = draft.trim();
     if (!text || waiting) return;
+    abortVoice();
+    setVoiceError("");
     setMessages((prev) => [
       ...prev,
       { id: nextId.current++, role: "user", content: text },
@@ -1005,6 +1151,20 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
             ),
           )}
         </div>
+        {listening && (
+          <p role="status" className="mb-2 flex items-center gap-2 text-xs text-fuchsia-300">
+            <span className="relative flex h-2.5 w-2.5" aria-hidden="true">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-fuchsia-400 opacity-75" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-fuchsia-400" />
+            </span>
+            Listening...
+          </p>
+        )}
+        {voiceError && (
+          <p role="alert" className="mb-2 text-xs text-red-300">
+            {voiceError}
+          </p>
+        )}
         <div className="flex items-end gap-2">
           <textarea
             ref={textareaRef}
@@ -1019,6 +1179,34 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
           />
           <button
             type="button"
+            onClick={toggleVoice}
+            disabled={!voiceSupported}
+            title={voiceSupported ? undefined : "Voice not supported in this browser"}
+            aria-label={listening ? "Stop voice input" : "Start voice input"}
+            aria-pressed={listening}
+            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border ${
+              listening
+                ? "border-fuchsia-400 bg-fuchsia-500/30 text-white"
+                : "border-white/10 text-zinc-200 hover:bg-white/10"
+            } disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="20"
+              height="20"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+            </svg>
+          </button>
+          <button
+            type="button"
             onClick={send}
             disabled={!draft.trim()}
             className={`h-11 rounded-xl bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`}
@@ -1026,6 +1214,10 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
             Send
           </button>
         </div>
+        <p className="mt-2 text-[11px] leading-snug text-amber-300">
+          Voice goes through your browser&apos;s speech service. Early demo: use sample
+          speech only.
+        </p>
       </footer>
         </>
       )}
