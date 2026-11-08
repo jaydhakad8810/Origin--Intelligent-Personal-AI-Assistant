@@ -110,7 +110,7 @@ def chat(
         history = [{"role": m.role, "content": m.content} for m in reversed(list(rows))]
 
     try:
-        limiter.check_and_count(user.id)
+        limiter.check_and_count(db, user.id)
     except limiter.DailyLimitExceeded as e:
         raise HTTPException(status_code=429, detail=str(e))
 

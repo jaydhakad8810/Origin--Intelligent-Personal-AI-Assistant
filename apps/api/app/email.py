@@ -3,7 +3,10 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, StringConstraints
 
+from sqlalchemy.orm import Session
+
 from app.auth import get_current_user
+from app.db import get_db
 from app.llm import limiter
 from app.llm.factory import get_provider
 from app.llm.prompts import EMAIL_POLISH_PROMPT
@@ -37,11 +40,16 @@ def _split_reply(reply: str) -> tuple[str, str]:
     return "", text
 
 
-# Nothing here touches the database, and the mail text is never logged.
+# The only database write is the daily usage counter. The mail text is never
+# saved or logged.
 @router.post("/polish", response_model=PolishResponse)
-def polish(body: PolishRequest, user: User = Depends(get_current_user)):
+def polish(
+    body: PolishRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     try:
-        limiter.check_and_count(user.id)
+        limiter.check_and_count(db, user.id)
     except limiter.DailyLimitExceeded as e:
         raise HTTPException(status_code=429, detail=str(e))
 
