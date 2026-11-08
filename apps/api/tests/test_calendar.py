@@ -57,11 +57,11 @@ def _client():
     return TestClient(app, follow_redirects=False)
 
 
-def _connect_row(session, user, access="AT", refresh="RT", expires_in=3600):
+def _connect_row(session, user, access="AT", refresh="RT", expires_in=3600, scopes=SCOPE):
     session.add(
         GoogleConnection(
             user_id=user.id,
-            scopes=SCOPE,
+            scopes=scopes,
             refresh_token_encrypted=crypto.encrypt(refresh),
             access_token_encrypted=crypto.encrypt(access),
             expires_at=datetime.now(timezone.utc) + timedelta(seconds=expires_in),
@@ -137,7 +137,7 @@ def test_callback_stores_encrypted_tokens(env):
     assert crypto.decrypt(row.refresh_token_encrypted) == "RT-1"
     body = parse_qs(calls[0].content.decode())
     assert body["code"] == ["abc"] and body["code_verifier"]
-    assert c.get("/v1/calendar/status").json() == {"connected": True}
+    assert c.get("/v1/calendar/status").json() == {"connected": True, "can_write": True}
 
 
 def test_callback_rejects_bad_state(env):
@@ -237,15 +237,141 @@ def test_user_isolation(env):
     a, b, current, responses, session = env
     _connect_row(session, a)
     c = _client()
-    assert c.get("/v1/calendar/status").json() == {"connected": True}
+    assert c.get("/v1/calendar/status").json() == {"connected": True, "can_write": True}
     current["user"] = b
-    assert c.get("/v1/calendar/status").json() == {"connected": False}
+    assert c.get("/v1/calendar/status").json() == {"connected": False, "can_write": False}
     assert c.get("/v1/calendar/events").status_code == 404
+    assert c.post("/v1/calendar/events", json=VALID).status_code == 409
+    assert calls == []
     # B disconnecting must not remove A's connection or revoke A's token.
     assert c.delete("/v1/google/calendar/disconnect").status_code == 204
     assert calls == []
     current["user"] = a
-    assert c.get("/v1/calendar/status").json() == {"connected": True}
+    assert c.get("/v1/calendar/status").json() == {"connected": True, "can_write": True}
+
+
+VALID = {
+    "title": "Dentist",
+    "start": "2026-11-09T10:00:00+02:00",
+    "end": "2026-11-09T11:00:00+02:00",
+    "location": "Clinic",
+}
+
+
+def test_create_event_ok(env):
+    a, _, _, responses, session = env
+    _connect_row(session, a)
+    responses["events"] = httpx.Response(
+        200,
+        json={
+            "id": "new1",
+            "summary": "Dentist",
+            "start": {"dateTime": "2026-11-09T10:00:00+02:00"},
+            "end": {"dateTime": "2026-11-09T11:00:00+02:00"},
+            "location": "Clinic",
+        },
+    )
+    res = _client().post("/v1/calendar/events", json=VALID)
+    assert res.status_code == 200
+    assert res.json() == {
+        "id": "new1",
+        "title": "Dentist",
+        "start": "2026-11-09T10:00:00+02:00",
+        "end": "2026-11-09T11:00:00+02:00",
+        "location": "Clinic",
+    }
+    req = calls[0]
+    assert req.method == "POST"
+    assert str(req.url).startswith(gcal.EVENTS_URL)
+    assert "/calendars/primary/" in str(req.url)
+    assert req.headers["authorization"] == "Bearer AT"
+    sent = json.loads(req.content)
+    assert sent["summary"] == "Dentist" and sent["location"] == "Clinic"
+    assert sent["start"]["dateTime"] == "2026-11-09T10:00:00+02:00"
+
+
+def test_create_event_refreshes_expired_token(env):
+    a, _, _, responses, session = env
+    _connect_row(session, a, expires_in=-10)
+    responses["token"] = httpx.Response(200, json={"access_token": "AT-new", "expires_in": 3600})
+    responses["events"] = httpx.Response(200, json={"id": "n", "summary": "Dentist"})
+    body = {k: v for k, v in VALID.items() if k != "location"}
+    assert _client().post("/v1/calendar/events", json=body).status_code == 200
+    assert calls[1].headers["authorization"] == "Bearer AT-new"
+    assert "location" not in json.loads(calls[1].content)
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"title": ""},
+        {"title": "x" * 201},
+        {"location": "x" * 201},
+        {"start": "2026-11-09T10:00:00"},  # no timezone
+        {"end": "2026-11-09T10:00:00+02:00"},  # end == start
+        {"end": "2026-11-09T09:00:00+02:00"},  # end < start
+        {"end": "2026-11-10T10:00:01+02:00"},  # > 24h
+        {"start": "nope"},
+    ],
+)
+def test_create_event_validation(env, patch):
+    a, _, _, _, session = env
+    _connect_row(session, a)
+    res = _client().post("/v1/calendar/events", json={**VALID, **patch})
+    assert res.status_code == 422
+    assert calls == []
+
+
+def test_create_event_24h_boundary_ok(env):
+    a, _, _, responses, session = env
+    _connect_row(session, a)
+    responses["events"] = httpx.Response(200, json={"id": "n"})
+    body = {**VALID, "end": "2026-11-10T10:00:00+02:00"}
+    assert _client().post("/v1/calendar/events", json=body).status_code == 200
+
+
+def test_create_event_logged_out_401():
+    app.dependency_overrides.clear()
+    app.dependency_overrides[get_db] = lambda: MagicMock()
+    assert _client().post("/v1/calendar/events", json=VALID).status_code == 401
+    app.dependency_overrides.clear()
+
+
+def test_create_event_read_only_403(env):
+    a, _, _, _, session = env
+    _connect_row(session, a, scopes=gcal.READ_SCOPE)
+    c = _client()
+    assert c.get("/v1/calendar/status").json() == {"connected": True, "can_write": False}
+    res = c.post("/v1/calendar/events", json=VALID)
+    assert res.status_code == 403
+    assert res.json() == {"detail": "Calendar is read-only. Reconnect to allow editing."}
+    assert calls == []
+
+
+def test_create_event_not_connected_409(env):
+    assert _client().post("/v1/calendar/events", json=VALID).status_code == 409
+    assert calls == []
+
+
+def test_create_event_failure_is_safe(env):
+    a, _, _, responses, session = env
+    _connect_row(session, a, access="SECRET-AT")
+    responses["events"] = httpx.Response(500, text="boom SECRET-AT Dentist")
+    res = _client().post("/v1/calendar/events", json=VALID)
+    assert res.status_code == 502
+    assert "SECRET" not in res.text and "Dentist" not in res.text
+
+
+def test_callback_accepts_legacy_readonly_grant(env):
+    _, _, _, responses, session = env
+    responses["token"] = httpx.Response(
+        200, json={"access_token": "x", "refresh_token": "y", "scope": gcal.READ_SCOPE}
+    )
+    c = _client()
+    state = _start(c)
+    res = c.get(f"/v1/google/calendar/callback?code=abc&state={state}")
+    assert res.headers["location"] == config.WEB_ORIGIN
+    assert c.get("/v1/calendar/status").json() == {"connected": True, "can_write": False}
 
 
 def test_disconnect_deletes_and_revokes(env):
