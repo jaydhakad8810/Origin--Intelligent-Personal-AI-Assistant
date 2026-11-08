@@ -136,6 +136,62 @@ type Tone = (typeof TONES)[number];
 
 const CHIPS = ["Note", "Email", "Tasks", "Calendar"];
 
+type CalendarEvent = {
+  id?: string;
+  title?: string;
+  start: string;
+  end?: string;
+  location?: string | null;
+};
+
+type CalendarState = "loading" | "error" | "disconnected" | "connected";
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+// Date-only strings ("2026-11-08") are parsed as local dates, not UTC.
+function parseEventDate(s: string): Date {
+  if (DATE_ONLY.test(s)) {
+    const [y, m, d] = s.split("-").map(Number);
+    return new Date(y, m - 1, d);
+  }
+  return new Date(s);
+}
+
+function dayKey(d: Date): string {
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function dayLabel(d: Date): string {
+  const now = new Date();
+  if (dayKey(d) === dayKey(now)) return "Today";
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  if (dayKey(d) === dayKey(tomorrow)) return "Tomorrow";
+  return d.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+}
+
+function eventTimeText(ev: CalendarEvent): string {
+  if (DATE_ONLY.test(ev.start)) return "All day";
+  const fmt = (s: string) =>
+    parseEventDate(s).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return ev.end && !DATE_ONLY.test(ev.end) ? `${fmt(ev.start)} - ${fmt(ev.end)}` : fmt(ev.start);
+}
+
+function groupEvents(events: CalendarEvent[]) {
+  const groups: { key: string; label: string; items: CalendarEvent[] }[] = [];
+  for (const ev of events) {
+    const d = parseEventDate(ev.start);
+    if (isNaN(d.getTime())) continue;
+    const key = dayKey(d);
+    let g = groups.find((x) => x.key === key);
+    if (!g) {
+      g = { key, label: dayLabel(d), items: [] };
+      groups.push(g);
+    }
+    g.items.push(ev);
+  }
+  return groups;
+}
+
 export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
@@ -149,7 +205,17 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
       new URLSearchParams(window.location.search).get("auth_error") === "1",
   );
   const [conversationId, setConversationId] = useState<string | null>(null);
-  const [view, setView] = useState<"chat" | "history" | "notes" | "email">("chat");
+  const [view, setView] = useState<"chat" | "history" | "notes" | "email" | "calendar">("chat");
+  const [calendarState, setCalendarState] = useState<CalendarState>("loading");
+  const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
+  const [calendarConfirmDisconnect, setCalendarConfirmDisconnect] = useState(false);
+  const [calendarMessage, setCalendarMessage] = useState("");
+  const [calendarConnectError] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("calendar_error") === "1",
+  );
+  const calendarErrorHandled = useRef(false);
   const [emailText, setEmailText] = useState("");
   const [emailTone, setEmailTone] = useState<Tone>("professional");
   const [emailSubject, setEmailSubject] = useState("");
@@ -320,7 +386,9 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
         if (!list) return;
         setConversations(list);
         setListState("idle");
-        if (list.length > 0) await openConversation(list[0].id, controller.signal);
+        if (list.length > 0) {
+          await openConversation(list[0].id, controller.signal, calendarConnectError);
+        }
       } catch {
         if (!controller.signal.aborted) setListState("error");
       }
@@ -360,7 +428,7 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
     return res ? ((await res.json()) as ConversationSummary[]) : null;
   }
 
-  async function openConversation(id: string, signal: AbortSignal) {
+  async function openConversation(id: string, signal: AbortSignal, keepView = false) {
     setMessagesState("loading");
     try {
       const res = await apiGet(`/v1/conversations/${id}/messages`, signal);
@@ -373,7 +441,7 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
         rows.map((r) => ({ id: nextId.current++, role: r.role, content: r.content })),
       );
       setConversationId(id);
-      setView("chat");
+      if (!keepView) setView("chat");
       setMessagesState("idle");
     } catch (error) {
       if (!signal.aborted) setMessagesState("error");
@@ -579,6 +647,86 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
       setEmailError("Could not copy. Select the text and copy it yourself.");
     }
   }
+
+  async function loadCalendar(connectError = false) {
+    setView("calendar");
+    setCalendarConfirmDisconnect(false);
+    setCalendarMessage(connectError ? "Could not connect Calendar. Try again." : "");
+    setCalendarState("loading");
+    try {
+      const statusRes = await fetch(`${API_URL}/v1/calendar/status`, {
+        credentials: "include",
+      });
+      if (statusRes.status === 401) {
+        setAuth("signedOut");
+        return;
+      }
+      if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status}`);
+      const status = (await statusRes.json()) as { connected?: unknown };
+      if (status.connected !== true) {
+        setCalendarEvents([]);
+        setCalendarState("disconnected");
+        return;
+      }
+      const res = await fetch(`${API_URL}/v1/calendar/events?days=7`, {
+        credentials: "include",
+      });
+      if (res.status === 401) {
+        setAuth("signedOut");
+        return;
+      }
+      if (res.status === 409 || res.status === 403) {
+        // Connection was lost or revoked.
+        setCalendarEvents([]);
+        setCalendarState("disconnected");
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as unknown;
+      const list = Array.isArray(data)
+        ? data
+        : data && typeof data === "object" && Array.isArray((data as { events?: unknown }).events)
+          ? (data as { events: unknown[] }).events
+          : [];
+      setCalendarEvents(list as CalendarEvent[]);
+      setCalendarState("connected");
+    } catch {
+      setCalendarState("error");
+    }
+  }
+
+  async function disconnectCalendar() {
+    setCalendarMessage("");
+    try {
+      const res = await fetch(`${API_URL}/v1/google/calendar/disconnect`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (res.status === 401) {
+        setAuth("signedOut");
+        return;
+      }
+      if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
+    } catch {
+      setCalendarMessage("Could not disconnect. Try again.");
+      return;
+    }
+    setCalendarConfirmDisconnect(false);
+    setCalendarEvents([]);
+    setCalendarState("disconnected");
+  }
+
+  // Back from a failed Google Calendar connect: open the Calendar view with a message.
+  useEffect(() => {
+    if (!calendarConnectError || !open || auth !== "signedIn") return;
+    if (calendarErrorHandled.current) return;
+    calendarErrorHandled.current = true;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("calendar_error");
+    window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+    loadCalendar(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [calendarConnectError, open, auth]);
 
   function showEmail() {
     setView("email");
@@ -1010,6 +1158,110 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
             </>
           )}
         </div>
+      ) : view === "calendar" ? (
+        <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-4 py-4">
+          {calendarState === "loading" ? (
+            <p className="m-auto text-sm text-zinc-400">Loading...</p>
+          ) : calendarState === "error" ? (
+            <div className="m-auto text-center">
+              <p role="alert" className="text-sm text-red-300">
+                Could not load your calendar.
+              </p>
+              <button
+                type="button"
+                onClick={() => loadCalendar()}
+                className={`mt-2 rounded-full border border-white/10 px-3 py-1 text-xs ${focusRing}`}
+              >
+                Try again
+              </button>
+            </div>
+          ) : calendarState === "disconnected" ? (
+            <div className="m-auto flex flex-col items-center gap-3 text-center">
+              {calendarMessage && (
+                <p role="alert" className="text-sm text-red-300">
+                  {calendarMessage}
+                </p>
+              )}
+              <p className="text-sm text-zinc-300">
+                Calendar is not connected. Connect it to see your next 7 days.
+              </p>
+              <a
+                href={`${API_URL}/v1/google/calendar/connect`}
+                className={`rounded-xl bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 px-4 py-2 text-sm font-medium text-white ${focusRing}`}
+              >
+                Connect Calendar
+              </a>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => loadCalendar()}
+                  className={`rounded-full border border-white/10 px-3 py-1 text-xs text-zinc-200 hover:bg-white/10 ${focusRing}`}
+                >
+                  Refresh
+                </button>
+                {calendarConfirmDisconnect ? (
+                  <>
+                    <span className="ml-auto text-xs text-zinc-200">Disconnect Calendar?</span>
+                    <button
+                      type="button"
+                      onClick={disconnectCalendar}
+                      className={`rounded-full bg-red-500/80 px-3 py-1 text-xs text-white ${focusRing}`}
+                    >
+                      Disconnect
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCalendarConfirmDisconnect(false)}
+                      className={`rounded-full px-3 py-1 text-xs text-zinc-300 hover:bg-white/10 ${focusRing}`}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCalendarConfirmDisconnect(true);
+                      setCalendarMessage("");
+                    }}
+                    className={`ml-auto rounded-full px-3 py-1 text-xs text-zinc-300 hover:bg-white/10 ${focusRing}`}
+                  >
+                    Disconnect
+                  </button>
+                )}
+              </div>
+              {calendarMessage && (
+                <p role="alert" className="text-xs text-red-300">
+                  {calendarMessage}
+                </p>
+              )}
+              {groupEvents(calendarEvents).length === 0 ? (
+                <p className="m-auto text-sm text-zinc-400">No events in the next 7 days</p>
+              ) : (
+                groupEvents(calendarEvents).map((g) => (
+                  <section key={g.key} className="flex flex-col gap-1">
+                    <h3 className="mt-1 text-xs font-semibold text-zinc-300">{g.label}</h3>
+                    {g.items.map((ev, i) => (
+                      <div
+                        key={ev.id ?? `${g.key}-${i}`}
+                        className="rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+                      >
+                        <p className="text-sm break-words">{ev.title || "(No title)"}</p>
+                        <p className="text-xs text-zinc-400">{eventTimeText(ev)}</p>
+                        {ev.location && (
+                          <p className="text-xs break-words text-zinc-400">{ev.location}</p>
+                        )}
+                      </div>
+                    ))}
+                  </section>
+                ))
+              )}
+            </>
+          )}
+        </div>
       ) : view === "history" ? (
         <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-4 py-4">
           {listState === "loading" ? (
@@ -1129,11 +1381,13 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
       <footer className="border-t border-white/10 px-4 py-3">
         <div className="mb-2 flex gap-2">
           {CHIPS.map((chip) =>
-            chip === "Note" || chip === "Email" ? (
+            chip === "Note" || chip === "Email" || chip === "Calendar" ? (
               <button
                 key={chip}
                 type="button"
-                onClick={chip === "Note" ? showNotes : showEmail}
+                onClick={
+                  chip === "Note" ? showNotes : chip === "Email" ? showEmail : () => loadCalendar()
+                }
                 className={`rounded-full border border-white/10 px-3 py-1 text-xs text-zinc-200 hover:bg-white/10 ${focusRing}`}
               >
                 {chip}

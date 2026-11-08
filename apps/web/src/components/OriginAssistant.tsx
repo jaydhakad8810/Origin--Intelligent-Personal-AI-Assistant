@@ -13,6 +13,13 @@ export default function OriginAssistant() {
     orbRef.current?.focus();
   }
 
+  // Google sent us back after a failed Calendar connect: open the panel.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("calendar_error") === "1") {
+      setOpen(true);
+    }
+  }, []);
+
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {

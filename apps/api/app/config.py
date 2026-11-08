@@ -29,3 +29,6 @@ except ValueError:
 # Placeholders for the Gemini provider (not used yet). Never log or return these.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL")
+
+# Fernet key used to encrypt stored Google tokens. Checked when used (see app/crypto.py).
+TOKEN_ENCRYPTION_KEY = os.getenv("TOKEN_ENCRYPTION_KEY")
