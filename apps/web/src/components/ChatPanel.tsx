@@ -176,6 +176,43 @@ function eventTimeText(ev: CalendarEvent): string {
   return ev.end && !DATE_ONLY.test(ev.end) ? `${fmt(ev.start)} - ${fmt(ev.end)}` : fmt(ev.start);
 }
 
+type EventForm = { title: string; date: string; start: string; end: string; location: string };
+
+const EVENT_TITLE_MAX = 200;
+const EVENT_LOCATION_MAX = 200;
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const toDateInput = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const toTimeInput = (d: Date) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+
+// Defaults: today, next full hour, +1 hour.
+function defaultEventForm(): EventForm {
+  const n = new Date();
+  const start = new Date(n.getFullYear(), n.getMonth(), n.getDate(), n.getHours() + 1, 0, 0);
+  const end = new Date(start.getTime() + 60 * 60 * 1000);
+  return {
+    title: "",
+    date: toDateInput(start),
+    start: toTimeInput(start),
+    end: toTimeInput(end),
+    location: "",
+  };
+}
+
+// Built from the browser's local time.
+function eventRange(f: EventForm): { start: Date; end: Date } {
+  return { start: new Date(`${f.date}T${f.start}`), end: new Date(`${f.date}T${f.end}`) };
+}
+
+function validateEventForm(f: EventForm): string {
+  if (!f.title.trim()) return "Add a title.";
+  if (!f.date || !f.start || !f.end) return "Choose a date, start time and end time.";
+  const { start, end } = eventRange(f);
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) return "Choose a valid date and time.";
+  if (end <= start) return "End time must be after the start time.";
+  return "";
+}
+
 function groupEvents(events: CalendarEvent[]) {
   const groups: { key: string; label: string; items: CalendarEvent[] }[] = [];
   for (const ev of events) {
@@ -216,6 +253,19 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
       new URLSearchParams(window.location.search).get("calendar_error") === "1",
   );
   const calendarErrorHandled = useRef(false);
+  const [calendarCanWrite, setCalendarCanWrite] = useState(false);
+  const [eventStep, setEventStep] = useState<"closed" | "form" | "preview">("closed");
+  const [eventForm, setEventForm] = useState<EventForm>({
+    title: "",
+    date: "",
+    start: "",
+    end: "",
+    location: "",
+  });
+  const [eventSending, setEventSending] = useState(false);
+  const [eventError, setEventError] = useState("");
+  const [eventNotice, setEventNotice] = useState("");
+  const eventSendingRef = useRef(false);
   const [emailText, setEmailText] = useState("");
   const [emailTone, setEmailTone] = useState<Tone>("professional");
   const [emailSubject, setEmailSubject] = useState("");
@@ -662,12 +712,16 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
         return;
       }
       if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status}`);
-      const status = (await statusRes.json()) as { connected?: unknown };
+      const status = (await statusRes.json()) as { connected?: unknown; can_write?: unknown };
       if (status.connected !== true) {
         setCalendarEvents([]);
+        setCalendarCanWrite(false);
         setCalendarState("disconnected");
         return;
       }
+      const canWrite = status.can_write === true;
+      setCalendarCanWrite(canWrite);
+      if (!canWrite) setEventStep("closed");
       const res = await fetch(`${API_URL}/v1/calendar/events?days=7`, {
         credentials: "include",
       });
@@ -692,6 +746,75 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
       setCalendarState("connected");
     } catch {
       setCalendarState("error");
+    }
+  }
+
+  function openEventForm() {
+    setEventForm(defaultEventForm());
+    setEventError("");
+    setEventNotice("");
+    setEventStep("form");
+  }
+
+  function previewEvent() {
+    const problem = validateEventForm(eventForm);
+    if (problem) {
+      setEventError(problem);
+      return;
+    }
+    setEventError("");
+    setEventStep("preview");
+  }
+
+  async function confirmEvent() {
+    if (eventSendingRef.current) return; // no double submit
+    const problem = validateEventForm(eventForm);
+    if (problem) {
+      setEventError(problem);
+      setEventStep("form");
+      return;
+    }
+    eventSendingRef.current = true;
+    setEventSending(true);
+    setEventError("");
+    try {
+      const { start, end } = eventRange(eventForm);
+      const res = await fetch(`${API_URL}/v1/calendar/events`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: eventForm.title.trim(),
+          start: start.toISOString(),
+          end: end.toISOString(),
+          location: eventForm.location.trim() || null,
+        }),
+      });
+      if (res.status === 401) {
+        setAuth("signedOut");
+        return;
+      }
+      if (res.status === 403) {
+        setEventStep("closed");
+        setCalendarCanWrite(false);
+        return;
+      }
+      if (res.status === 409) {
+        setEventStep("closed");
+        setCalendarEvents([]);
+        setCalendarCanWrite(false);
+        setCalendarState("disconnected");
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setEventStep("closed");
+      setEventNotice("Event created");
+      await loadCalendar();
+    } catch {
+      setEventError("Could not create the event. Try again.");
+    } finally {
+      eventSendingRef.current = false;
+      setEventSending(false);
     }
   }
 
@@ -1238,7 +1361,164 @@ export default function ChatPanel({ open, onClose, orbRef }: ChatPanelProps) {
                   {calendarMessage}
                 </p>
               )}
-              {groupEvents(calendarEvents).length === 0 ? (
+              {!calendarCanWrite && (
+                <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                  <p className="text-xs text-zinc-200">Editing is off.</p>
+                  <a
+                    href={`${API_URL}/v1/google/calendar/connect`}
+                    className={`ml-auto rounded-full border border-white/10 px-3 py-1 text-xs text-zinc-100 hover:bg-white/10 ${focusRing}`}
+                  >
+                    Allow editing
+                  </a>
+                </div>
+              )}
+              {eventNotice && eventStep === "closed" && (
+                <p role="status" className="text-xs text-emerald-300">
+                  {eventNotice}
+                </p>
+              )}
+              {calendarCanWrite && eventStep === "closed" && (
+                <button
+                  type="button"
+                  onClick={openEventForm}
+                  className={`self-start rounded-full bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 px-3 py-1 text-xs font-medium text-white ${focusRing}`}
+                >
+                  Add event
+                </button>
+              )}
+              {calendarCanWrite && eventStep === "form" && (
+                <form
+                  className="flex flex-col gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    previewEvent();
+                  }}
+                >
+                  <input
+                    value={eventForm.title}
+                    onChange={(e) => setEventForm({ ...eventForm, title: e.target.value })}
+                    maxLength={EVENT_TITLE_MAX}
+                    required
+                    aria-label="Event title"
+                    placeholder="Title"
+                    className={`rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 ${focusRing}`}
+                  />
+                  <input
+                    type="date"
+                    value={eventForm.date}
+                    onChange={(e) => setEventForm({ ...eventForm, date: e.target.value })}
+                    required
+                    aria-label="Event date"
+                    className={`rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 [color-scheme:dark] ${focusRing}`}
+                  />
+                  <div className="flex gap-2">
+                    <input
+                      type="time"
+                      value={eventForm.start}
+                      onChange={(e) => setEventForm({ ...eventForm, start: e.target.value })}
+                      required
+                      aria-label="Start time"
+                      className={`min-w-0 flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 [color-scheme:dark] ${focusRing}`}
+                    />
+                    <input
+                      type="time"
+                      value={eventForm.end}
+                      onChange={(e) => setEventForm({ ...eventForm, end: e.target.value })}
+                      required
+                      aria-label="End time"
+                      className={`min-w-0 flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 [color-scheme:dark] ${focusRing}`}
+                    />
+                  </div>
+                  <input
+                    value={eventForm.location}
+                    onChange={(e) => setEventForm({ ...eventForm, location: e.target.value })}
+                    maxLength={EVENT_LOCATION_MAX}
+                    aria-label="Event location"
+                    placeholder="Location (optional)"
+                    className={`rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 ${focusRing}`}
+                  />
+                  {eventError && (
+                    <p role="alert" className="text-xs text-red-300">
+                      {eventError}
+                    </p>
+                  )}
+                  <div className="flex gap-2">
+                    <button
+                      type="submit"
+                      className={`rounded-full bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 px-3 py-1 text-xs font-medium text-white ${focusRing}`}
+                    >
+                      Preview
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEventStep("closed");
+                        setEventError("");
+                      }}
+                      className={`rounded-full px-3 py-1 text-xs text-zinc-300 hover:bg-white/10 ${focusRing}`}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              )}
+              {calendarCanWrite && eventStep === "preview" && (
+                <div className="flex flex-col gap-2">
+                  <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                    <p className="text-sm break-words">{eventForm.title.trim()}</p>
+                    <p className="text-xs text-zinc-400">
+                      {eventRange(eventForm).start.toLocaleDateString(undefined, {
+                        weekday: "long",
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      })}
+                    </p>
+                    <p className="text-xs text-zinc-400">
+                      {[eventRange(eventForm).start, eventRange(eventForm).end]
+                        .map((d) =>
+                          d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }),
+                        )
+                        .join(" - ")}
+                    </p>
+                    {eventForm.location.trim() && (
+                      <p className="text-xs break-words text-zinc-400">
+                        {eventForm.location.trim()}
+                      </p>
+                    )}
+                  </div>
+                  <p className="text-xs text-zinc-300">
+                    Origin will create this event on your Google Calendar.
+                  </p>
+                  {eventError && (
+                    <p role="alert" className="text-xs text-red-300">
+                      {eventError}
+                    </p>
+                  )}
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={confirmEvent}
+                      disabled={eventSending}
+                      className={`rounded-full bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 px-3 py-1 text-xs font-medium text-white disabled:opacity-50 ${focusRing}`}
+                    >
+                      {eventSending ? "Creating..." : "Confirm"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEventStep("form");
+                        setEventError("");
+                      }}
+                      disabled={eventSending}
+                      className={`rounded-full px-3 py-1 text-xs text-zinc-300 hover:bg-white/10 disabled:opacity-50 ${focusRing}`}
+                    >
+                      Back
+                    </button>
+                  </div>
+                </div>
+              )}
+              {eventStep !== "closed" ? null : groupEvents(calendarEvents).length === 0 ? (
                 <p className="m-auto text-sm text-zinc-400">No events in the next 7 days</p>
               ) : (
                 groupEvents(calendarEvents).map((g) => (
