@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,7 +16,8 @@ from app.auth import get_current_user
 from app.db import get_db
 from app.models import GoogleConnection, User
 
-SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
+SCOPE = "https://www.googleapis.com/auth/calendar.events"
+READ_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 REVOKE_URL = "https://oauth2.googleapis.com/revoke"
@@ -130,7 +132,8 @@ def callback(
             "code_verifier": verifier,
         }
     )
-    if body is None or SCOPE not in (body.get("scope") or "").split():
+    granted = (body.get("scope") or "").split() if body else []
+    if body is None or not (SCOPE in granted or READ_SCOPE in granted):
         return failure
 
     try:
@@ -155,7 +158,42 @@ def callback(
 
 @router.get("/v1/calendar/status")
 def status(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return {"connected": _get_row(db, user) is not None}
+    row = _get_row(db, user)
+    return {"connected": row is not None, "can_write": _can_write(row)}
+
+
+def _can_write(row: GoogleConnection | None) -> bool:
+    return row is not None and SCOPE in (row.scopes or "").split()
+
+
+def _shape(e: dict) -> dict:
+    def when(v: dict) -> str | None:
+        return v.get("dateTime") or v.get("date")
+
+    return {
+        "id": e.get("id"),
+        "title": e.get("summary") or "(No title)",
+        "start": when(e.get("start") or {}),
+        "end": when(e.get("end") or {}),
+        "location": e.get("location"),
+    }
+
+
+class EventIn(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    start: datetime
+    end: datetime
+    location: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def _check(self):
+        if self.start.tzinfo is None or self.end.tzinfo is None:
+            raise ValueError("start and end must include a timezone")
+        if self.end <= self.start:
+            raise ValueError("end must be after start")
+        if self.end - self.start > timedelta(hours=24):
+            raise ValueError("event must be 24 hours or shorter")
+        return self
 
 
 def _access_token(db: Session, row: GoogleConnection) -> str:
@@ -216,20 +254,43 @@ def events(
     except Exception:
         raise HTTPException(status_code=502, detail="Calendar request failed") from None
 
-    def when(v: dict) -> str | None:
-        return v.get("dateTime") or v.get("date")
+    return [_shape(e) for e in items if e.get("status") != "cancelled"]
 
-    return [
-        {
-            "id": e.get("id"),
-            "title": e.get("summary") or "(No title)",
-            "start": when(e.get("start") or {}),
-            "end": when(e.get("end") or {}),
-            "location": e.get("location"),
-        }
-        for e in items
-        if e.get("status") != "cancelled"
-    ]
+
+@router.post("/v1/calendar/events")
+def create_event(
+    payload: EventIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_config()
+    row = _get_row(db, user)
+    if row is None:
+        raise HTTPException(status_code=409, detail="Calendar is not connected")
+    if not _can_write(row):
+        raise HTTPException(
+            status_code=403, detail="Calendar is read-only. Reconnect to allow editing."
+        )
+    body: dict = {
+        "summary": payload.title,
+        "start": {"dateTime": payload.start.isoformat()},
+        "end": {"dateTime": payload.end.isoformat()},
+    }
+    if payload.location:
+        body["location"] = payload.location
+    try:
+        token = _access_token(db, row)
+        with _http() as client:
+            res = client.post(
+                EVENTS_URL, headers={"Authorization": f"Bearer {token}"}, json=body
+            )
+        if res.status_code not in (200, 201):
+            raise HTTPException(status_code=502, detail="Calendar request failed")
+        return _shape(res.json())
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=502, detail="Calendar request failed") from None
 
 
 @router.delete("/v1/google/calendar/disconnect", status_code=204)
