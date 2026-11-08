@@ -5,7 +5,6 @@ from sqlalchemy import func, select
 from app import config
 from app.auth import get_current_user
 from app.db import get_db
-from app.llm import limiter
 from app.llm.base import LLMProvider
 from app.main import app
 from app.models import Conversation, Message, Note, User
@@ -27,13 +26,6 @@ class Fake(LLMProvider):
 def use_provider(monkeypatch, provider):
     monkeypatch.setattr("app.email.get_provider", lambda: provider)
     return provider
-
-
-@pytest.fixture(autouse=True)
-def clean_limiter():
-    limiter.reset()
-    yield
-    limiter.reset()
 
 
 @pytest.fixture
